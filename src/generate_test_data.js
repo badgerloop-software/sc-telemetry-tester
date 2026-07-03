@@ -8,8 +8,22 @@
 const fs = require('fs');
 const path = require('path');
 
-// Load data format
-const dataFormat = require('../data/data_format.json');
+function loadDataFormat() {
+  const candidates = [
+    path.join(__dirname, '../../sc-data-format/format.json'),
+    path.join(__dirname, '../data/data_format.json'),
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return require(candidate);
+    }
+  }
+  throw new Error(
+    'No format.json found. Clone sc-data-format as tools/sc-data-format or keep data/data_format.json.',
+  );
+}
+
+const dataFormat = loadDataFormat();
 
 // Generate a random value within the signal's nominal range
 function generateValue(signalName, metadata, phase, t) {
@@ -179,7 +193,7 @@ function toCSV(records) {
 
 // Main
 function main() {
-  console.log('🚗 SC2 Test Data Generator');
+  console.log('SC Telemetry Test Data Generator');
   console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━');
   
   const numRecords = parseInt(process.argv[2]) || 30;

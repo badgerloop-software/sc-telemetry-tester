@@ -26,7 +26,7 @@ function loadDataFormat() {
 const dataFormat = loadDataFormat();
 
 // Generate a random value within the signal's nominal range
-function generateValue(signalName, metadata, phase, t) {
+function generateValue(signalName, metadata, phase, t, numRecords) {
   const [numBytes, dataType, units, nominalMin, nominalMax, category] = metadata;
   
   // Handle boolean types
@@ -83,14 +83,69 @@ function generateValue(signalName, metadata, phase, t) {
       return 0;
       
     case 'lat':
-      // Madison, WI area - simulate movement
-      return 43.0735 + t * 0.0001;
+      // Walk along ASC 2026 route: UofM (Minneapolis) heading southeast
+      // These waypoints are sampled from course_data/ASC_2026_FullRoute.csv
+      // so position projection and grade lookups in the inference service work correctly.
+      {
+        const COURSE_WAYPOINTS = [
+          [44.9760, -93.2339], // Day 1 start: UofM Minneapolis
+          [44.9433, -93.1936],
+          [44.9103, -93.1922],
+          [44.9399, -93.1010],
+          [44.8863, -93.0047],
+          [44.7424, -92.8526],
+          [44.6445, -92.7723],
+          [44.5680, -92.6192],
+          [44.5577, -92.4861],
+          [44.4626, -92.2854],
+          [44.4114, -92.1385],
+          [44.3053, -92.0051],
+          [44.1990, -91.8767],
+          [44.0465, -91.6739],
+          [44.0068, -91.4840],
+          [43.9084, -91.3541],
+          [43.8412, -91.2484],
+          [43.7274, -91.2005],
+          [43.4774, -91.2154],
+          [43.2621, -91.0518],
+          [43.0497, -91.1524], // ~4000 points in: approaching Iowa border
+        ];
+        const idx = Math.min(Math.floor(t / numRecords * COURSE_WAYPOINTS.length), COURSE_WAYPOINTS.length - 1);
+        return COURSE_WAYPOINTS[idx][0];
+      }
       
     case 'lon':
-      return -89.4012 + t * 0.00015;
+      {
+        const COURSE_WAYPOINTS = [
+          [44.9760, -93.2339],
+          [44.9433, -93.1936],
+          [44.9103, -93.1922],
+          [44.9399, -93.1010],
+          [44.8863, -93.0047],
+          [44.7424, -92.8526],
+          [44.6445, -92.7723],
+          [44.5680, -92.6192],
+          [44.5577, -92.4861],
+          [44.4626, -92.2854],
+          [44.4114, -92.1385],
+          [44.3053, -92.0051],
+          [44.1990, -91.8767],
+          [44.0465, -91.6739],
+          [44.0068, -91.4840],
+          [43.9084, -91.3541],
+          [43.8412, -91.2484],
+          [43.7274, -91.2005],
+          [43.4774, -91.2154],
+          [43.2621, -91.0518],
+          [43.0497, -91.1524],
+        ];
+        const idx = Math.min(Math.floor(t / numRecords * COURSE_WAYPOINTS.length), COURSE_WAYPOINTS.length - 1);
+        return COURSE_WAYPOINTS[idx][1];
+      }
       
     case 'elev':
-      return 268 + Math.sin(t / 10) * 5;
+      // Elevation decreases slightly as route heads south from Minneapolis (~260m)
+      return Math.max(180, 260 - (t / numRecords) * 60 + Math.sin(t / 3) * 8);
       
     case 'mcc_state':
       if (phase === 'idle') return 0;
@@ -141,7 +196,7 @@ function generateTestData(numRecords = 30) {
     
     // Generate all signals
     for (const [signalName, metadata] of Object.entries(dataFormat)) {
-      record[signalName] = generateValue(signalName, metadata, phase, i);
+      record[signalName] = generateValue(signalName, metadata, phase, i, numRecords);
     }
     
     // Add some computed/derived values

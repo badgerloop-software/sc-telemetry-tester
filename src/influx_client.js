@@ -11,6 +11,18 @@
 const DEFAULT_MEASUREMENT_PRODUCTION = 'telemetry_snapshot';
 const DEFAULT_MEASUREMENT_FLAT = 'telemetry';
 const DEFAULT_FIELDS_FLAT = ['soc', 'pack_power', 'air_temp'];
+const DEFAULT_SIGNALS_PRODUCTION = [
+  'soc',
+  'pack_power',
+  'pack_current',
+  'motor_current',
+  'speed',
+  'lat',
+  'lon',
+  'elev',
+  'mppt_power_out',
+  'air_temp',
+];
 
 function requireEnv(name, fallbacks = []) {
   const names = [name, ...fallbacks];
@@ -39,6 +51,9 @@ function getConfig() {
   const fieldsRaw = process.env.INFLUXDB_FIELDS || DEFAULT_FIELDS_FLAT.join(',');
   const flatFields = fieldsRaw.split(',').map((f) => f.trim()).filter(Boolean);
 
+  const signalsRaw = process.env.INFLUXDB_SIGNALS || DEFAULT_SIGNALS_PRODUCTION.join(',');
+  const productionSignals = signalsRaw.split(',').map((f) => f.trim()).filter(Boolean);
+
   return {
     url,
     token,
@@ -47,6 +62,7 @@ function getConfig() {
     writeMode: isFlat ? 'flat' : 'production',
     measurement,
     flatFields,
+    productionSignals,
     tagSource: process.env.INFLUX_TAG_SOURCE || 'sc_telemetry_tester',
   };
 }
@@ -64,6 +80,7 @@ function printConfigHelp() {
   console.log('\nOptional:');
   console.log('  export INFLUXDB_MEASUREMENT="telemetry_snapshot"  # production default');
   console.log('  export INFLUX_WRITE_MODE="production"             # or "flat" for inference defaults');
+  console.log('  export INFLUXDB_SIGNALS="soc,speed,pack_power,..." # production mode — strategy fields only');
   console.log('  export INFLUXDB_FIELDS="soc,pack_power,air_temp"  # flat mode only');
   console.log('');
 }
@@ -113,10 +130,12 @@ function coerceNumeric(value) {
   return num;
 }
 
-function buildProductionLines(record, timestampNs, measurement) {
+function buildProductionLines(record, timestampNs, measurement, allowedSignals = null) {
+  const allow = allowedSignals ? new Set(allowedSignals) : null;
   const lines = [];
   for (const [signal, rawValue] of Object.entries(record)) {
     if (signal === 'timestamp') continue;
+    if (allow && !allow.has(signal)) continue;
     const numeric = coerceNumeric(rawValue);
     if (numeric === null) continue;
     const escSignal = escapeTagValue(signal);
@@ -150,7 +169,9 @@ function buildWriteBodyForRows(rows, config) {
       );
       if (line) lines.push(line);
     } else {
-      lines.push(...buildProductionLines(record, timestampNs, config.measurement));
+      lines.push(
+        ...buildProductionLines(record, timestampNs, config.measurement, config.productionSignals),
+      );
     }
   }
   return lines.join('\n');

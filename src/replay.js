@@ -20,6 +20,7 @@ const {
   buildWriteBodyForRows,
   writeLines,
 } = require('./influx_client');
+const { loadRoute, injectRouteIntoRecords } = require('./route_inject');
 
 const DEFAULT_FILE = path.join(__dirname, '../data/test_telemetry.csv');
 
@@ -38,6 +39,11 @@ function parseArgs(argv) {
     maxRows: null,
     loop: false,
     shiftToNow: false,
+    routeFile: null,
+    routeMode: 'distance',
+    speedField: 'speed',
+    speedUnit: 'mph',
+    startRow: 0,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -61,6 +67,9 @@ function parseArgs(argv) {
       case '--max-rows':
         args.maxRows = parseInt(argv[++i], 10);
         break;
+      case '--start-row':
+        args.startRow = parseInt(argv[++i], 10) || 0;
+        break;
       case '--realtime':
         args.realtime = true;
         break;
@@ -69,6 +78,18 @@ function parseArgs(argv) {
         break;
       case '--shift-to-now':
         args.shiftToNow = true;
+        break;
+      case '--route-file':
+        args.routeFile = path.resolve(argv[++i]);
+        break;
+      case '--route-mode':
+        args.routeMode = (argv[++i] || 'distance').toLowerCase();
+        break;
+      case '--speed-field':
+        args.speedField = argv[++i];
+        break;
+      case '--speed-unit':
+        args.speedUnit = (argv[++i] || 'mph').toLowerCase();
         break;
       case 'stream':
         args.realtime = true;
@@ -86,7 +107,42 @@ function parseArgs(argv) {
     args.file = DEFAULT_FILE;
   }
 
+  if (args.routeMode !== 'distance' && args.routeMode !== 'index') {
+    throw new Error(`Invalid --route-mode '${args.routeMode}' (use distance or index)`);
+  }
+  if (args.speedUnit !== 'mph' && args.speedUnit !== 'mps') {
+    throw new Error(`Invalid --speed-unit '${args.speedUnit}' (use mph or mps)`);
+  }
+
   return args;
+}
+
+function applyRouteInjection(records, cliArgs, timestampColumn, timestampsNs, timeSource = 'timestamps') {
+  if (!cliArgs.routeFile) return records;
+
+  const route = loadRoute(cliArgs.routeFile);
+  const injected = injectRouteIntoRecords(records, {
+    route,
+    mode: cliArgs.routeMode,
+    speedField: cliArgs.speedField,
+    speedUnit: cliArgs.speedUnit,
+    timestampColumn,
+    intervalS: cliArgs.intervalS,
+    timestampsNs,
+    timeSource,
+  });
+
+  console.log(`Route injection: ${cliArgs.routeFile}`);
+  console.log(
+    `  mode=${cliArgs.routeMode}, points=${route.points.length}, `
+    + `length=${(route.totalLengthM / 1000).toFixed(1)} km`,
+  );
+  if (cliArgs.routeMode === 'distance') {
+    console.log(`  speed field=${cliArgs.speedField} (${cliArgs.speedUnit})`);
+  }
+  console.log('');
+
+  return injected;
 }
 
 function resolveConfig(cliArgs) {
@@ -118,7 +174,8 @@ async function bulkReplay(records, config, cliArgs, timestampColumn) {
   const limit = cliArgs.maxRows ? Math.min(records.length, cliArgs.maxRows) : records.length;
   const slice = records.slice(0, limit);
   const timestampsNs = computeTimestamps(slice, timestampColumn, cliArgs.intervalS, cliArgs.shiftToNow);
-  const rows = slice.map((record, index) => ({
+  const withRoute = applyRouteInjection(slice, cliArgs, timestampColumn, timestampsNs);
+  const rows = withRoute.map((record, index) => ({
     record,
     timestampNs: timestampsNs[index],
   }));
@@ -126,6 +183,8 @@ async function bulkReplay(records, config, cliArgs, timestampColumn) {
   console.log(`Mode: bulk, measurement=${config.measurement}`);
   if (config.writeMode === 'flat') {
     console.log(`Fields: ${config.flatFields.join(', ')}`);
+  } else {
+    console.log(`Signals: ${config.productionSignals.join(', ')}`);
   }
   if (timestampColumn) {
     console.log(`Timestamp column: ${timestampColumn}`);
@@ -145,6 +204,14 @@ async function bulkReplay(records, config, cliArgs, timestampColumn) {
 async function realtimeReplay(records, config, cliArgs, timestampColumn) {
   const limit = cliArgs.maxRows ? Math.min(records.length, cliArgs.maxRows) : records.length;
   const intervalMs = Math.round(cliArgs.intervalS * 1000);
+  const slice = records.slice(0, limit);
+  const withRoute = applyRouteInjection(
+    slice,
+    cliArgs,
+    timestampColumn,
+    null,
+    'fixed_interval',
+  );
 
   console.log(`Mode: realtime, interval=${cliArgs.intervalS}s, loop=${cliArgs.loop}`);
   console.log(`Records: ${limit}`);
@@ -159,14 +226,9 @@ async function realtimeReplay(records, config, cliArgs, timestampColumn) {
 
   while (!stop) {
     for (let index = 0; index < limit && !stop; index++) {
-      const record = { ...records[index] };
-      const timestampsNs = computeTimestamps(
-        [record],
-        timestampColumn,
-        cliArgs.intervalS,
-        true,
-      );
-      const rows = [{ record, timestampNs: timestampsNs[0] }];
+      const record = { ...withRoute[index] };
+      const timestampNs = Date.now() * 1e6;
+      const rows = [{ record, timestampNs }];
       const body = buildWriteBodyForRows(rows, config);
       const result = await writeLines(config, body);
 
@@ -205,22 +267,33 @@ async function main() {
     process.exit(1);
   }
 
+  if (cliArgs.routeFile && !fs.existsSync(cliArgs.routeFile)) {
+    console.error(`Error: Route file not found: ${cliArgs.routeFile}`);
+    process.exit(1);
+  }
+
   const { headers, records } = loadReplayFile(cliArgs.file);
   if (records.length === 0) {
     console.error('Error: Replay file contains no data rows.');
     process.exit(1);
   }
 
+  const startRow = Math.max(0, Math.min(cliArgs.startRow, records.length - 1));
+  const recordsSlice = startRow > 0 ? records.slice(startRow) : records;
+
   const timestampColumn = detectTimestampColumn(headers, cliArgs.timestampColumn);
 
   console.log(`Loaded ${records.length} rows from ${cliArgs.file}`);
+  if (startRow > 0) {
+    console.log(`Start row: ${startRow} (${recordsSlice.length} rows remaining)`);
+  }
   console.log(`Influx: ${config.url}`);
   console.log(`Write mode: ${config.writeMode}`);
 
   if (cliArgs.realtime) {
-    await realtimeReplay(records, config, cliArgs, timestampColumn);
+    await realtimeReplay(recordsSlice, config, cliArgs, timestampColumn);
   } else {
-    await bulkReplay(records, config, cliArgs, timestampColumn);
+    await bulkReplay(recordsSlice, config, cliArgs, timestampColumn);
   }
 }
 

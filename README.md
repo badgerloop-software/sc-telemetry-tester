@@ -83,6 +83,38 @@ node src/replay.js --file path/to/log.xlsx --shift-to-now
 | `--loop` | Restart from first row after file ends |
 | `--shift-to-now` | Rewrite CSV timestamps relative to now |
 | `--max-rows` | Cap rows written |
+| `--start-row` | Skip leading rows (e.g. pre-race idle telemetry with speed 0) |
+| `--route-file` | Grades/route CSV (`latitude`, `longitude`, `elevation_m`, `distance_m`) — injects `lat`/`lon`/`elev` into each telemetry row |
+| `--route-mode` | `distance` (speed × Δt along route, default) or `index` (row fraction along route) |
+| `--speed-field` | Telemetry column for speed in distance mode (default: `speed`) |
+| `--speed-unit` | `mph` (default) or `mps` |
+
+### Route + signal fusion (old telemetry, 2026 course GPS)
+
+When legacy logs have missing GPS (`lat`/`lon` = 0 or -1001) but good CAN signals,
+replay signals from TestDataAnalysis and inject location from BSR ASC grades CSV:
+
+```bash
+export INFLUX_WRITE_MODE=production
+export INFLUXDB_MEASUREMENT=telemetry_snapshot
+
+node src/replay.js \
+  --file ../../course_data/TestDataAnalysis/2024-4-7rawdata.csv \
+  --route-file "../../course_data/BSR ASC GPX Grades Data 1.0 2026/UofMtoSummitElmentary_grades.csv" \
+  --route-mode distance \
+  --speed-unit mph \
+  --start-row 31267 \
+  --shift-to-now \
+  --max-rows 6000
+```
+
+`2024-4-7rawdata.csv` has ~31k idle rows at speed 0 before driving starts — use `--start-row 31267` so distance mode advances along the route.
+
+`--max-rows 6000` at ~20 Hz ≈ 5 minutes — enough for one strategy lookback window (300 s).
+
+Full segment (~83k rows) without `--max-rows` is fine for bulk load; strategy uses the latest 300 s window.
+
+Use `--route-mode index` for a quick test without integrating speed.
 
 ## End-to-end test (race-profile)
 
@@ -125,6 +157,7 @@ sc-telemetry-tester/
 │   ├── load_replay_file.js   # CSV / Excel loader
 │   ├── timestamp.js          # Timestamp detection and shift-to-now
 │   ├── replay.js             # Main replay CLI
+│   ├── route_inject.js       # Merge route grades CSV → lat/lon/elev
 │   ├── generate_test_data.js
 │   └── test_connection.js
 └── package.json
